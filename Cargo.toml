@@ -1,0 +1,25 @@
+[package]
+name = "nagabuttons"
+version = "0.1.0"
+edition = "2021"
+description = "Lightweight macOS menu bar app that turns the Razer Naga V2 HyperSpeed buttons into real mouse buttons"
+license = "MIT"
+repository = "https://github.com/fol2/nagabuttons"
+
+# Only the AppKit and Foundation parts in use: the full bindings take minutes to compile.
+[dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std", "NSArray", "NSBundle", "NSNotification", "NSObject", "NSString", "NSURL",
+] }
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std", "NSApplication", "NSButton", "NSCell", "NSControl", "NSImage", "NSMenu", "NSMenuItem",
+    "NSResponder", "NSRunningApplication", "NSStatusBar", "NSStatusBarButton", "NSStatusItem",
+    "NSView", "NSWorkspace", "objc2-core-foundation",
+] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
