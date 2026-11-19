@@ -56,8 +56,22 @@ extern "C" {
     fn IOHIDManagerOpen(m: Ref, opts: u32) -> i32;
     fn IOHIDValueGetElement(v: Ref) -> Ref;
     fn IOHIDValueGetIntegerValue(v: Ref) -> isize;
+    fn IOHIDValueGetTimeStamp(v: Ref) -> u64;
     fn IOHIDElementGetUsagePage(e: Ref) -> u32;
     fn IOHIDElementGetUsage(e: Ref) -> u32;
+}
+
+extern "C" {
+    fn mach_absolute_time() -> u64;
+    fn mach_timebase_info(info: *mut [u32; 2]) -> i32;
+}
+
+/// Milliseconds from the mouse's HID report to now.
+fn delay_ms(stamp: u64) -> f64 {
+    let mut tb = [0u32; 2];
+    unsafe { mach_timebase_info(&mut tb) };
+    let ticks = unsafe { mach_absolute_time() }.saturating_sub(stamp);
+    ticks as f64 * tb[0] as f64 / tb[1] as f64 / 1e6
 }
 
 #[link(name = "CoreGraphics", kind = "framework")]
@@ -197,9 +211,9 @@ fn refresh() {
 }
 
 extern "C" fn on_value(_: *mut c_void, _: i32, _: Ref, value: Ref) {
-    let (page, usage, down) = unsafe {
+    let (page, usage, down, stamp) = unsafe {
         let e = IOHIDValueGetElement(value);
-        (IOHIDElementGetUsagePage(e), IOHIDElementGetUsage(e), IOHIDValueGetIntegerValue(value) != 0)
+        (IOHIDElementGetUsagePage(e), IOHIDElementGetUsage(e), IOHIDValueGetIntegerValue(value) != 0, IOHIDValueGetTimeStamp(value))
     };
     if page != 0x07 { return; }
     let Some(c) = control(usage) else { return };
@@ -214,7 +228,7 @@ extern "C" fn on_value(_: *mut c_void, _: i32, _: Ref, value: Ref) {
             post(OTHER_DOWN, b);
             let name = match c { Control::Side(n) if s.hypershift => format!("Hypershift + side {n}"),
                 Control::Side(n) => format!("Side {n}"), _ => "Top".into() };
-            s.last = format!("Last press: {name} → BUTTON{}", b + 1);
+            s.last = format!("Last press: {name} → BUTTON{} ({:.1} ms)", b + 1, delay_ms(stamp));
             true
         } else {
             if let Some(b) = s.held[i].take() { post(OTHER_UP, b); }
@@ -416,6 +430,13 @@ fn main() {
     if NSRunningApplication::runningApplicationsWithBundleIdentifier(&NSString::from_str(BUNDLE_ID)).count() > 1 {
         return;
     }
+    // A menu bar app with no window is an App Nap candidate, and App Nap
+    // delays the HID callbacks. Keep it latency-critical for its lifetime.
+    let _activity = objc2_foundation::NSProcessInfo::processInfo().beginActivityWithOptions_reason(
+        objc2_foundation::NSActivityOptions::UserInitiatedAllowingIdleSystemSleep
+            | objc2_foundation::NSActivityOptions::LatencyCritical,
+        ns_string!("Turns mouse buttons into input as they are pressed"),
+    );
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
     let delegate = Delegate::new(mtm);

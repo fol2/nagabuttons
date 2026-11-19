@@ -10,7 +10,7 @@ repository = "https://github.com/fol2/nagabuttons"
 [dependencies]
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = [
-    "std", "NSArray", "NSBundle", "NSError", "NSNotification", "NSObject", "NSString", "NSURL", "NSUserDefaults",
+    "std", "NSArray", "NSBundle", "NSError", "NSNotification", "NSObject", "NSProcessInfo", "NSString", "NSURL", "NSUserDefaults",
 ] }
 objc2-service-management = { version = "0.3", default-features = false, features = ["std", "SMAppService", "objc2", "objc2-foundation"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = [
