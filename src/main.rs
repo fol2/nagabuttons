@@ -20,7 +20,8 @@ use objc2_app_kit::{
     NSControlStateValueOn, NSImage, NSMenu, NSMenuItem, NSRunningApplication, NSStatusBar,
     NSStatusItem, NSVariableStatusItemLength, NSWorkspace,
 };
-use objc2_foundation::{ns_string, MainThreadMarker, NSNotification, NSObject, NSObjectProtocol, NSString, NSURL};
+use objc2_foundation::{ns_string, MainThreadMarker, NSNotification, NSObject, NSObjectProtocol, NSString, NSURL, NSUserDefaults};
+use objc2_service_management::{SMAppService, SMAppServiceStatus};
 
 type Ref = *const c_void;
 
@@ -133,6 +134,7 @@ struct Ui {
     info: Retained<NSMenuItem>,
     last: Retained<NSMenuItem>,
     toggle: Retained<NSMenuItem>,
+    login: Retained<NSMenuItem>,
 }
 
 thread_local! {
@@ -186,6 +188,9 @@ fn refresh() {
         ui.info.setTitle(&NSString::from_str(text));
         ui.last.setTitle(&NSString::from_str(&last));
         ui.toggle.setState(if on { NSControlStateValueOn } else { NSControlStateValueOff });
+        let login = unsafe { SMAppService::mainAppService().status() };
+        ui.login.setState(if login == SMAppServiceStatus::Enabled { NSControlStateValueOn } else { NSControlStateValueOff });
+        ui.login.setTitle(if login == SMAppServiceStatus::RequiresApproval { ns_string!("Start at Login (approve in Settings)") } else { ns_string!("Start at Login") });
         let mtm = MainThreadMarker::new().unwrap();
         if let Some(b) = ui.status.button(mtm) { b.setAppearsDisabled(!active); }
     });
@@ -230,9 +235,13 @@ extern "C" fn on_removed(_: *mut c_void, _: i32, _: Ref, _: Ref) {
     refresh();
 }
 
+/// Opens only with both permissions: without Input Monitoring, opening can
+/// still succeed but no presses arrive, and muting the keys would leave the
+/// side buttons dead.
 fn try_open() -> bool {
     let m = ST.with_borrow(|s| s.manager) as Ref;
-    let ok = unsafe { IOHIDManagerOpen(m, 0) } == 0;
+    let granted = unsafe { CGPreflightListenEventAccess() && CGPreflightPostEventAccess() };
+    let ok = granted && unsafe { IOHIDManagerOpen(m, 0) } == 0;
     ST.with_borrow_mut(|s| s.open = ok);
     ok
 }
@@ -246,6 +255,7 @@ extern "C" fn on_retry(_: Ref, _: *mut c_void) {
         unsafe { CFRunLoopTimerInvalidate(t) };
         eprintln!("naga-buttons: opened after permission grant");
     } else if unsafe { CGPreflightListenEventAccess() && CGPreflightPostEventAccess() } {
+        // Granted, yet opening failed: this process needs a fresh start.
         let bundle = objc2_foundation::NSBundle::mainBundle().bundlePath().to_string();
         let _ = std::process::Command::new("/bin/sh").args(["-c", "sleep 1; open \"$0\"", &bundle]).spawn();
         std::process::exit(75);
@@ -259,6 +269,9 @@ fn cfstr(s: &str) -> Ref {
 }
 
 fn start_hid() {
+    // A crash or kill can leave the keys muted; give them back until we can
+    // really read the mouse.
+    mute_mouse_keys(false);
     unsafe {
         CGRequestListenEventAccess();
         CGRequestPostEventAccess();
@@ -311,6 +324,18 @@ define_class!(
             refresh();
         }
 
+        #[unsafe(method(toggleLogin:))]
+        fn toggle_login(&self, _sender: Option<&AnyObject>) {
+            let svc = unsafe { SMAppService::mainAppService() };
+            let r = unsafe { match svc.status() {
+                SMAppServiceStatus::Enabled => svc.unregisterAndReturnError(),
+                SMAppServiceStatus::RequiresApproval => { SMAppService::openSystemSettingsLoginItems(); Ok(()) }
+                _ => svc.registerAndReturnError(),
+            } };
+            if let Err(e) = r { eprintln!("naga-buttons: login item: {e:?}"); }
+            refresh();
+        }
+
         #[unsafe(method(openPrivacy:))]
         fn open_privacy(&self, _sender: Option<&AnyObject>) {
             if let Some(url) = NSURL::URLWithString(ns_string!("x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")) {
@@ -339,11 +364,13 @@ define_class!(
             let info = menu_item(mtm, "Starting…", None, "", None);
             let last = menu_item(mtm, "Last press: none yet", None, "", None);
             let toggle = menu_item(mtm, "Enabled", Some(sel!(toggle:)), "e", Some(me));
+            let login = menu_item(mtm, "Start at Login", Some(sel!(toggleLogin:)), "", Some(me));
             menu.addItem(&menu_item(mtm, "NagaButtons", None, "", None));
             menu.addItem(&info);
             menu.addItem(&last);
             menu.addItem(&NSMenuItem::separatorItem(mtm));
             menu.addItem(&toggle);
+            menu.addItem(&login);
             menu.addItem(&NSMenuItem::separatorItem(mtm));
             for line in ["Side 1–12 → BUTTON6–17", "Top front → BUTTON18", "Hold top rear (Hypershift) + side 1–12 → BUTTON19–30"] {
                 menu.addItem(&menu_item(mtm, line, None, "", None));
@@ -355,7 +382,15 @@ define_class!(
             status.setMenu(Some(&menu));
             // Keeps the place you ⌘-drag the icon to across restarts.
             status.setAutosaveName(Some(ns_string!("NagaButtons")));
-            UI.with(|u| { let _ = u.set(Ui { status, info, last, toggle }); });
+            UI.with(|u| { let _ = u.set(Ui { status, info, last, toggle, login }); });
+            // Start at login by default, once; the menu item turns it off.
+            let defaults = NSUserDefaults::standardUserDefaults();
+            if !defaults.boolForKey(ns_string!("LoginItemOffered")) {
+                defaults.setBool_forKey(true, ns_string!("LoginItemOffered"));
+                if let Err(e) = unsafe { SMAppService::mainAppService().registerAndReturnError() } {
+                    eprintln!("naga-buttons: login item: {e:?}");
+                }
+            }
             start_hid();
             refresh();
         }
