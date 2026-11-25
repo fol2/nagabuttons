@@ -17,7 +17,7 @@ use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{define_class, msg_send, sel, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSControlStateValueOff,
-    NSControlStateValueOn, NSImage, NSMenu, NSMenuItem, NSRunningApplication, NSStatusBar,
+    NSControlStateValueOn, NSImage, NSMenu, NSMenuDelegate, NSMenuItem, NSRunningApplication, NSStatusBar,
     NSStatusItem, NSVariableStatusItemLength, NSWorkspace,
 };
 use objc2_foundation::{ns_string, MainThreadMarker, NSNotification, NSObject, NSObjectProtocol, NSString, NSURL, NSUserDefaults};
@@ -159,6 +159,19 @@ thread_local! {
     static UI: OnceCell<Ui> = const { OnceCell::new() };
 }
 
+thread_local! { static TRACE: RefCell<Option<std::fs::File>> = const { RefCell::new(None) }; }
+
+/// Opt-in event log (~/Library/Logs/NagaButtons.log) for diagnosing lag or
+/// stray presses. Turn on, then restart the app:
+/// `defaults write io.github.fol2.nagabuttons Trace -bool true`
+fn trace(line: std::fmt::Arguments) {
+    TRACE.with_borrow_mut(|f| if let Some(f) = f {
+        use std::io::Write;
+        let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
+        let _ = writeln!(f, "{t} {line}");
+    });
+}
+
 fn post(kind: u32, b: u32) {
     unsafe {
         let here = CGEventCreate(null());
@@ -210,41 +223,48 @@ fn refresh() {
     });
 }
 
-extern "C" fn on_value(_: *mut c_void, _: i32, _: Ref, value: Ref) {
+extern "C" fn on_value(_: *mut c_void, _: i32, sender: Ref, value: Ref) {
     let (page, usage, down, stamp) = unsafe {
         let e = IOHIDValueGetElement(value);
         (IOHIDElementGetUsagePage(e), IOHIDElementGetUsage(e), IOHIDValueGetIntegerValue(value) != 0, IOHIDValueGetTimeStamp(value))
     };
     if page != 0x07 { return; }
+    trace(format_args!("hid dev={sender:p} usage={usage:#x} down={down} delay={:.1}ms", delay_ms(stamp)));
     let Some(c) = control(usage) else { return };
-    let changed = ST.with_borrow_mut(|s| {
-        if !s.enabled { return false; }
-        if c == Control::Hypershift { s.hypershift = down; return false; }
+    // No UI work here: the menu reads `last` when it opens. Refreshing on
+    // every press held up the next press or release on this run loop.
+    ST.with_borrow_mut(|s| {
+        if !s.enabled { return; }
+        if c == Control::Hypershift { s.hypershift = down; return; }
         let i = slot(c);
         if down {
-            if s.held[i].is_some() { return false; }
-            let Some(b) = button(c, s.hypershift) else { return false };
+            if s.held[i].is_some() { trace(format_args!("  ignored: already held")); return; }
+            let Some(b) = button(c, s.hypershift) else { return };
             s.held[i] = Some(b);
             post(OTHER_DOWN, b);
+            trace(format_args!("  post down BUTTON{}", b + 1));
             let name = match c { Control::Side(n) if s.hypershift => format!("Hypershift + side {n}"),
                 Control::Side(n) => format!("Side {n}"), _ => "Top".into() };
             s.last = format!("Last press: {name} → BUTTON{} ({:.1} ms)", b + 1, delay_ms(stamp));
-            true
+        } else if let Some(b) = s.held[i].take() {
+            post(OTHER_UP, b);
+            trace(format_args!("  post up BUTTON{}", b + 1));
         } else {
-            if let Some(b) = s.held[i].take() { post(OTHER_UP, b); }
-            false
+            trace(format_args!("  up without down"));
         }
     });
-    if changed { refresh(); }
 }
 
 extern "C" fn on_device(_: *mut c_void, _: i32, _: Ref, _: Ref) {
     let enabled = ST.with_borrow_mut(|s| { s.devices += 1; s.enabled });
+    trace(format_args!("device added"));
     if enabled { mute_mouse_keys(true); }
+    trace(format_args!("  mute done"));
     refresh();
 }
 
 extern "C" fn on_removed(_: *mut c_void, _: i32, _: Ref, _: Ref) {
+    trace(format_args!("device removed"));
     ST.with_borrow_mut(|s| { s.devices = s.devices.saturating_sub(1); s.hypershift = false; release_all(s); });
     refresh();
 }
@@ -360,6 +380,11 @@ define_class!(
 
     unsafe impl NSObjectProtocol for Delegate {}
 
+    unsafe impl NSMenuDelegate for Delegate {
+        #[unsafe(method(menuNeedsUpdate:))]
+        fn menu_needs_update(&self, _menu: &NSMenu) { refresh(); }
+    }
+
     unsafe impl NSApplicationDelegate for Delegate {
         #[unsafe(method(applicationDidFinishLaunching:))]
         fn did_finish_launching(&self, _n: &NSNotification) {
@@ -393,6 +418,7 @@ define_class!(
             menu.addItem(&menu_item(mtm, "Privacy Settings…", Some(sel!(openPrivacy:)), "", Some(me)));
             menu.addItem(&NSMenuItem::separatorItem(mtm));
             menu.addItem(&menu_item(mtm, "Quit NagaButtons", Some(sel!(terminate:)), "q", None));
+            menu.setDelegate(Some(ProtocolObject::from_ref(self)));
             status.setMenu(Some(&menu));
             // Keeps the place you ⌘-drag the icon to across restarts.
             status.setAutosaveName(Some(ns_string!("NagaButtons")));
@@ -404,6 +430,11 @@ define_class!(
                 if let Err(e) = unsafe { SMAppService::mainAppService().registerAndReturnError() } {
                     eprintln!("naga-buttons: login item: {e:?}");
                 }
+            }
+            if defaults.boolForKey(ns_string!("Trace")) {
+                let path = format!("{}/Library/Logs/NagaButtons.log", std::env::var("HOME").unwrap_or_default());
+                TRACE.set(std::fs::OpenOptions::new().create(true).append(true).open(path).ok());
+                trace(format_args!("start {}", env!("CARGO_PKG_VERSION")));
             }
             start_hid();
             refresh();
