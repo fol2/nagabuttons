@@ -62,10 +62,13 @@ fn send(line: &str) {
 /// the app it uses the app's privacy grants. If it dies it is started
 /// again; exit code 75 means a fresh grant needs a fresh app.
 fn run_daemon(trace: bool) {
+    let relaunched = std::env::args().any(|a| a == "--relaunched");
     std::thread::spawn(move || loop {
+        if QUITTING.load(Ordering::Relaxed) { DAEMON_GONE.store(true, Ordering::Relaxed); return; }
         let exe = std::env::current_exe().map(|p| p.with_file_name("nagabuttonsd")).unwrap_or_default();
         let mut cmd = Command::new(exe);
         if trace { cmd.arg("--trace"); }
+        if relaunched { cmd.arg("--no-relaunch"); }
         let code = match cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn() {
             Ok(mut child) => {
                 *DAEMON_IN.lock().unwrap() = child.stdin.take();
@@ -91,7 +94,7 @@ fn run_daemon(trace: bool) {
         if QUITTING.load(Ordering::Relaxed) { DAEMON_GONE.store(true, Ordering::Relaxed); return; }
         if code == Some(75) {
             let bundle = objc2_foundation::NSBundle::mainBundle().bundlePath().to_string();
-            let _ = Command::new("/bin/sh").args(["-c", "sleep 1; open \"$0\"", &bundle]).spawn();
+            let _ = Command::new("/bin/sh").args(["-c", "sleep 1; open \"$0\" --args --relaunched", &bundle]).spawn();
             std::process::exit(75);
         }
         { let mut v = VIEW.lock().unwrap(); v.open = false; v.devices = 0; }

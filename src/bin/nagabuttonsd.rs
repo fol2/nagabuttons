@@ -236,6 +236,16 @@ fn mute_mouse_keys(on: bool) {
     if !matches!(r, Ok(s) if s.success()) { trace(format_args!("hidutil failed: {r:?}")); }
 }
 
+/// Brings the mute in line with the state: muted only while enabled, open
+/// and connected, so the side buttons are never both muted and unread. The
+/// lock keeps two hidutil runs (run loop and stdin thread) in order; it is
+/// not ST, so hidutil never holds up a press.
+fn sync_mute() {
+    static ORDER: Mutex<()> = Mutex::new(());
+    let _order = ORDER.lock().unwrap();
+    mute_mouse_keys(st(|s| s.enabled && s.open && s.devices > 0));
+}
+
 fn release_all(s: &mut State) {
     for b in s.held.iter_mut().filter_map(Option::take) { post(OTHER_UP, b); }
 }
@@ -276,9 +286,9 @@ extern "C" fn on_value(_: *mut c_void, _: i32, sender: Ref, value: Ref) {
 }
 
 extern "C" fn on_device(_: *mut c_void, _: i32, _: Ref, _: Ref) {
-    let enabled = st(|s| { s.devices += 1; s.enabled });
+    st(|s| s.devices += 1);
     trace(format_args!("device added"));
-    if enabled { mute_mouse_keys(true); }
+    sync_mute();
     trace(format_args!("  mute done"));
     tell_state();
 }
@@ -303,13 +313,15 @@ fn try_open() -> bool {
 
 /// Retries until the permissions are granted. A grant often needs a fresh
 /// process, so once both are granted and opening still fails, exit with 75:
-/// the app then starts itself again.
+/// the app then starts itself again, once (--no-relaunch stops a loop when
+/// opening fails for another reason).
 extern "C" fn on_retry(_: Ref, _: *mut c_void) {
     if try_open() {
         let t = st(|s| s.timer) as Ref;
         unsafe { CFRunLoopTimerInvalidate(t) };
         trace(format_args!("opened after permission grant"));
-    } else if granted() {
+        sync_mute();
+    } else if granted() && !std::env::args().any(|a| a == "--no-relaunch") {
         std::process::exit(75);
     }
     tell_state();
@@ -342,14 +354,13 @@ fn read_commands() {
         match line.as_str() {
             "enable" | "disable" => {
                 let on = line == "enable";
-                let connected = st(|s| {
+                st(|s| {
                     s.enabled = on;
                     s.hypershift = false;
                     release_all(s);
-                    s.devices > 0
                 });
                 trace(format_args!("enabled={on}"));
-                if connected { mute_mouse_keys(on); }
+                sync_mute();
             }
             "game 1" | "game 0" => {
                 let front = line == "game 1";
@@ -358,8 +369,10 @@ fn read_commands() {
             _ => {}
         }
     }
-    st(release_all);
-    mute_mouse_keys(false);
+    // Disabled first, so no press is posted while hidutil runs and then
+    // left down by the exit.
+    st(|s| { s.enabled = false; release_all(s); });
+    sync_mute();
     trace(format_args!("app gone; exit"));
     std::process::exit(0);
 }
