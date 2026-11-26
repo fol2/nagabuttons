@@ -8,6 +8,8 @@ APP_DIR="${APP_DIR:-/Applications}"
 
 ./bundle.sh
 osascript -e 'quit app "NagaButtons"' 2>/dev/null || true
+# Wait for it to go: a new copy that still sees the old one exits at once.
+for _ in $(seq 50); do pgrep -x nagabuttons >/dev/null || break; sleep 0.2; done
 # Version 0.1.0 used a LaunchAgent. launchd starts the binary outside
 # LaunchServices, and macOS then may not match it to its privacy grants.
 launchctl bootout "gui/$(id -u)/io.github.fol2.nagabuttons" 2>/dev/null || true

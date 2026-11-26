@@ -22,9 +22,11 @@ The mouse normally types `1` to `=`. macOS cannot tell those keys from your keyb
 ## How it works
 
 - Reads the raw HID input of the Naga's keyboard interface only (USB receiver `1532:00b4`). Other keyboards are never touched, so your keyboard and numpad work as usual.
-- Mutes those 14 keys on that one device with `hidutil` `UserKeyMapping`, so they never reach macOS as typing. Quitting or pausing gives them back.
+- Mutes those 14 keys on the Naga's keyboard interfaces with `hidutil` `UserKeyMapping`, so they never reach macOS as typing. Quitting or pausing gives them back.
 - Posts each press as a mouse button with the keyboard modifiers held at that moment.
-- Event-driven on the main run loop: no polling, no event tap, no network. About 370 KB.
+- Two small processes. The daemon, `nagabuttonsd`, reads the mouse and posts the buttons; it links no AppKit and uses about 4 MB. The menu bar app only shows the status and keeps the daemon running, and starts it again if it dies.
+- A press that reaches the daemon more than 50 ms late is dropped, not posted: in a game a missed press costs less than a late one. A release is always posted.
+- Event-driven: no event tap, no network.
 
 ## Requirements
 
@@ -55,13 +57,23 @@ The mouse icon shows the status (Active, Paused, Mouse not connected, permission
 Needs Rust and the Xcode Command Line Tools.
 
 ```bash
-./install.sh     # build, copy to /Applications, start at login with a LaunchAgent
+./install.sh     # build, copy to /Applications and open it
 ./bundle.sh      # only build dist/NagaButtons.app
-./uninstall.sh   # remove the app and the LaunchAgent
+./uninstall.sh   # remove the app
 cargo test      # button map check
 ```
 
 `APP_DIR` changes the install folder. `SIGN_ID` picks a code-signing identity; the default ad-hoc signature means macOS asks for the permissions again after every rebuild.
+
+## Troubleshooting
+
+For lag or stray presses, turn on the event log and restart the app:
+
+```bash
+defaults write io.github.fol2.nagabuttons Trace -bool true
+```
+
+`~/Library/Logs/NagaButtons.log` then records each HID report with its delay and the button posted. While World of Warcraft is the front app it also records the clicks and keys the game receives; nothing typed into another app is recorded. `defaults delete io.github.fol2.nagabuttons Trace` turns it off.
 
 ## Limitations
 
