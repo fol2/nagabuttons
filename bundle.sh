@@ -10,7 +10,7 @@ APP=dist/NagaButtons.app
 cargo build --release
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp target/release/nagabuttons "$APP/Contents/MacOS/nagabuttons"
+cp target/release/nagabuttons target/release/nagabuttonsd "$APP/Contents/MacOS/"
 
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 swift icon.swift "$WORK/icon.png"
@@ -38,6 +38,8 @@ cat > "$APP/Contents/Info.plist" <<EOF
 <key>NSHumanReadableCopyright</key><string>MIT licence</string>
 </dict></plist>
 EOF
+# The daemon first: the app's signature seals it.
+codesign --force --sign "${SIGN_ID:--}" --identifier io.github.fol2.nagabuttons.daemon "$APP/Contents/MacOS/nagabuttonsd"
 codesign --force --sign "${SIGN_ID:--}" --identifier io.github.fol2.nagabuttons "$APP"
 codesign --verify --strict "$APP"
 echo "Built $APP ($VERSION)"
